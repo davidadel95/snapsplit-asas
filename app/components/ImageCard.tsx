@@ -13,12 +13,10 @@ export default function ImageCard({ image, onClick }: ImageCardProps) {
   const [hasError, setHasError] = useState(false);
 
   const handleImageLoad = () => {
-    console.log('Image loaded:', image.name);
     setIsLoading(false);
   };
 
-  const handleImageError = (e: any) => {
-    console.error('Image failed to load:', image.name, e);
+  const handleImageError = () => {
     setIsLoading(false);
     setHasError(true);
   };
