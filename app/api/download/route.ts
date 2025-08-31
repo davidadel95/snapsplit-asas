@@ -83,7 +83,10 @@ export async function GET(request: NextRequest) {
     const downloadFilename = filename || key.split('/').pop() || 'download';
 
     // Return the file with proper headers for download
-    return new NextResponse(buffer, {
+    // Convert Buffer to Uint8Array for Response compatibility
+    const uint8Array = new Uint8Array(buffer);
+    
+    return new Response(uint8Array, {
       headers: {
         'Content-Type': contentType,
         'Content-Disposition': `attachment; filename="${downloadFilename}"`,

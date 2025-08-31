@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { ImageItem } from '../api/gallery/route';
 
 interface ImageCardProps {
@@ -11,14 +11,52 @@ interface ImageCardProps {
 export default function ImageCard({ image, onClick }: ImageCardProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
+  const [debugInfo, setDebugInfo] = useState<string>('');
+  const imgRef = useRef<HTMLImageElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  const handleImageLoad = () => {
+  // Debug logging
+  useEffect(() => {
+    console.log(`[ImageCard] ${image.name}: Component mounted`);
+    console.log(`[ImageCard] ${image.name}: URL = ${image.url}`);
+    console.log(`[ImageCard] ${image.name}: Key = ${image.key}`);
+    
+    // Check container dimensions
+    if (containerRef.current) {
+      const containerRect = containerRef.current.getBoundingClientRect();
+      console.log(`[ImageCard] ${image.name}: Container dimensions = ${containerRect.width}x${containerRect.height}`);
+      setDebugInfo(`Container: ${Math.round(containerRect.width)}x${Math.round(containerRect.height)}`);
+    }
+  }, [image]);
+
+  const handleImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    console.log(`[ImageCard] ${image.name}: Image loaded successfully`);
+    console.log(`[ImageCard] ${image.name}: Natural dimensions = ${img.naturalWidth}x${img.naturalHeight}`);
+    console.log(`[ImageCard] ${image.name}: Display dimensions = ${img.width}x${img.height}`);
+    
+    // Check computed styles
+    const computedStyle = window.getComputedStyle(img);
+    console.log(`[ImageCard] ${image.name}: Computed styles:`, {
+      objectFit: computedStyle.objectFit,
+      width: computedStyle.width,
+      height: computedStyle.height,
+      display: computedStyle.display,
+      opacity: computedStyle.opacity,
+      visibility: computedStyle.visibility,
+    });
+    
     setIsLoading(false);
+    setDebugInfo(`${img.naturalWidth}x${img.naturalHeight} → ${img.width}x${img.height}`);
   };
 
-  const handleImageError = () => {
+  const handleImageError = (e: React.SyntheticEvent<HTMLImageElement>) => {
+    console.error(`[ImageCard] ${image.name}: Image failed to load`);
+    console.error(`[ImageCard] ${image.name}: Error event:`, e);
+    console.error(`[ImageCard] ${image.name}: Image src:`, e.currentTarget.src);
     setIsLoading(false);
     setHasError(true);
+    setDebugInfo('FAILED TO LOAD');
   };
 
   return (
@@ -26,16 +64,25 @@ export default function ImageCard({ image, onClick }: ImageCardProps) {
       className="group relative cursor-pointer overflow-hidden rounded-lg bg-gray-100 shadow-sm hover:shadow-md transition-all duration-300 hover:scale-105"
       onClick={onClick}
     >
-      {/* Use aspect-square for consistent sizing */}
-      <div className="aspect-square w-full bg-gray-200 relative">
+      {/* Fixed height container for more reliable rendering */}
+      <div 
+        ref={containerRef}
+        className="w-full h-64 bg-gray-200 relative flex items-center justify-center"
+        style={{ minHeight: '256px' }} // Explicit height fallback
+      >
         
-        {/* Always render the image with full opacity */}
+        {/* Always render the image - no conditional hiding */}
         <img
+          ref={imgRef}
           src={image.url}
           alt={image.name}
-          className={`absolute inset-0 w-full h-full object-cover rounded-lg ${
-            hasError ? 'hidden' : ''
-          }`}
+          className="w-full h-full object-cover rounded-lg block"
+          style={{
+            maxWidth: '100%',
+            maxHeight: '100%',
+            objectFit: 'cover',
+            display: hasError ? 'none' : 'block'
+          }}
           onLoad={handleImageLoad}
           onError={handleImageError}
           loading="lazy"
@@ -59,6 +106,13 @@ export default function ImageCard({ image, onClick }: ImageCardProps) {
               </svg>
               <p className="text-xs">Failed to load</p>
             </div>
+          </div>
+        )}
+        
+        {/* Debug info overlay - only in development */}
+        {process.env.NODE_ENV === 'development' && debugInfo && (
+          <div className="absolute top-1 left-1 bg-black bg-opacity-75 text-white text-xs p-1 rounded">
+            {debugInfo}
           </div>
         )}
       </div>

@@ -31,22 +31,9 @@ export default function ImageModal({
     
     try {
       setIsDownloading(true);
-      console.log('Starting download for:', currentImage.name);
       
       // Use our download proxy API
       const downloadUrl = `/api/download?key=${encodeURIComponent(currentImage.key)}&filename=${encodeURIComponent(currentImage.name)}`;
-      console.log('Download URL:', downloadUrl);
-      
-      // Try fetch first to check if the API works
-      try {
-        const response = await fetch(downloadUrl, { method: 'HEAD' });
-        if (!response.ok) {
-          throw new Error(`Download API returned ${response.status}: ${response.statusText}`);
-        }
-      } catch (fetchError) {
-        console.error('Download API test failed:', fetchError);
-        throw new Error('Download service is not available');
-      }
       
       // Create download link
       const link = document.createElement('a');
@@ -58,8 +45,6 @@ export default function ImageModal({
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      
-      console.log('Download triggered successfully');
       
     } catch (error) {
       console.error('Download failed:', error);
