@@ -1,0 +1,10 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "com.rapidasolutions.snapsplit",
+    "sha256_cert_fingerprints": [
+      "58:E3:AB:C5:7A:66:18:88:95:07:F2:7B:EF:0D:6A:B6:5C:43:60:83:C1:9D:5E:AF:24:C4:BC:26:29:6C:7C:3F"
+    ]
+  }
+}]
