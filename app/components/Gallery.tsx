@@ -74,6 +74,14 @@ export default function Gallery() {
     }
   };
 
+  const handleDelete = (key: string) => {
+    // Close modal if open
+    setSelectedImageIndex(null);
+
+    // Refresh the gallery to reflect the deletion
+    fetchImages(currentPage);
+  };
+
   if (isLoading) {
     return (
       <div className="container mx-auto px-4 py-8">
@@ -172,6 +180,7 @@ export default function Gallery() {
             key={image.key}
             image={image}
             onClick={() => openModal(index)}
+            onDelete={handleDelete}
           />
         ))}
       </div>
