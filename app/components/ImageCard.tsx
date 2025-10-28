@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { ImageItem } from '../api/gallery/route';
 
 interface ImageCardProps {
@@ -12,21 +12,11 @@ export default function ImageCard({ image, onClick }: ImageCardProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
 
-  useEffect(() => {
-    console.log('ImageCard rendered:', image.name, 'URL:', image.url);
-  }, [image]);
-
-  const handleImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
-    console.log('Image loaded successfully:', image.name);
-    const img = e.currentTarget;
-    console.log('Image dimensions:', img.naturalWidth, 'x', img.naturalHeight);
+  const handleImageLoad = () => {
     setIsLoading(false);
   };
 
-  const handleImageError = (e: React.SyntheticEvent<HTMLImageElement>) => {
-    console.error('Image failed to load:', image.name);
-    console.error('URL:', image.url);
-    console.error('Error:', e);
+  const handleImageError = () => {
     setIsLoading(false);
     setHasError(true);
   };
