@@ -1,10 +1,14 @@
-[{
-  "relation": ["delegate_permission/common.handle_all_urls"],
-  "target": {
-    "namespace": "android_app",
-    "package_name": "com.rapida.snapsplit",
-    "sha256_cert_fingerprints": [
-      "58:E3:AB:C5:7A:66:18:88:95:07:F2:7B:EF:0D:6A:B6:5C:43:60:83:C1:9D:5E:AF:24:C4:BC:26:29:6C:7C:3F"
-    ]
-  }
-}]
+  [
+    {
+      "relation": [
+        "delegate_permission/common.handle_all_urls"
+      ],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "com.rapida.snapsplit",
+        "sha256_cert_fingerprints": [
+          "4F:03:33:96:A0:3A:CB:8B:DA:03:18:0E:77:E2:2D:3B:E3:74:00:A2:71:40:2C:94:1B:14:FF:83:2F:79:78:6C"
+        ]
+      }
+    }
+  ]
