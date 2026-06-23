@@ -4,7 +4,7 @@
     "details": [
       {
         "appID": "YYTV62Z9U8.com.rapida.snapspliit",
-        "paths": [ "/share/*" ]
+        "paths": [ "/share/*", "/s/*" ]
       }
     ]
   }
