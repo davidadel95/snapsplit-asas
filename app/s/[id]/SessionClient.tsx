@@ -89,6 +89,7 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
             });
           },
           (err) => {
+            console.error("session listener error", err);
             setErrorMessage(err.message);
             setPhase("error");
           }
@@ -100,6 +101,11 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
             setParticipants(
               snap.docs.map((d) => d.data() as SessionParticipant)
             );
+          },
+          (err) => {
+            console.error("participants listener error", err);
+            setErrorMessage(err.message);
+            setPhase("error");
           }
         );
 
@@ -109,6 +115,11 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
             setClaims(
               snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<SessionClaim, "id">) }))
             );
+          },
+          (err) => {
+            console.error("claims listener error", err);
+            setErrorMessage(err.message);
+            setPhase("error");
           }
         );
       } catch (err) {
