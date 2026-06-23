@@ -1,11 +1,21 @@
 "use client"
 
-import { Suspense } from "react"
-import { useSearchParams } from "next/navigation"
+import { Suspense, useEffect } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
 
 function ShareContent() {
   const searchParams = useSearchParams()
+  const router = useRouter()
   const data = searchParams.get("data")
+  const id = searchParams.get("id")
+
+  // New real-time sessions are linked as /share?id=... by older app builds.
+  // Forward them to the live session experience.
+  useEffect(() => {
+    if (id) {
+      router.replace(`/s/${id}`)
+    }
+  }, [id, router])
 
   const handleDownload = () => {
     window.open("https://apps.apple.com/eg/app/snap-split-bill-splitter/id6749791093", "_blank")
