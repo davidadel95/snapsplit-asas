@@ -107,6 +107,20 @@ function categorizeCharges(charges: SessionAdditionalCharge[]): {
   return { vat, service };
 }
 
+/// Full bill total (all items + service + VAT + fixed charges), matching
+/// iOS SplitCalculator.billTotal. Used to derive the "Remaining" figure.
+export function billTotal(session: LiveSession): number {
+  const subtotal = session.items.reduce((sum, item) => sum + item.totalPrice, 0);
+  const { vat, service } = categorizeCharges(session.additionalCharges);
+  const totalService = service.reduce((sum, c) => sum + subtotal * (c.percentage / 100), 0);
+  const totalVat = vat.reduce(
+    (sum, c) => sum + (subtotal + totalService) * (c.percentage / 100),
+    0
+  );
+  const totalFixed = session.fixedCharges.reduce((sum, c) => sum + c.amount, 0);
+  return subtotal + totalService + totalVat + totalFixed;
+}
+
 /// Remaining unclaimed quantity for an item.
 export function remainingQuantity(item: SessionItem, claims: SessionClaim[]): number {
   const claimed = claims

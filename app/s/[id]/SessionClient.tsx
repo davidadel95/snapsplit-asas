@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   collection,
   deleteDoc,
@@ -16,42 +16,65 @@ import {
 } from "@/lib/firebase";
 import {
   computeBreakdowns,
+  billTotal,
   colorForIndex,
+  COLOR_PALETTE,
   formatMoney,
   quantityForParticipant,
   remainingQuantity,
   type LiveSession,
+  type PersonBreakdown,
   type SessionClaim,
   type SessionItem,
   type SessionParticipant,
 } from "@/lib/session";
 
-const BG = "#2D4B42";
 const APP_STORE_URL =
   "https://apps.apple.com/eg/app/snap-split-bill-splitter/id6749791093";
 
+// ─── Brand colours ─────────────────────────────────────────────────────────
+const C = {
+  primary:          "#16342c",
+  primaryContainer: "#2d4b42",
+  surface:          "#faf9f7",
+  secondary:        "#266b42",
+  secondaryContainer: "#abf3bf",
+  onSecondaryContainer: "#2d7148",
+  onSurface:        "#1a1c1b",
+  onSurfaceVariant: "#414845",
+  outlineVariant:   "#c1c8c4",
+  surfaceContainerHigh: "#e8e8e6",
+  surfaceContainerLow: "#f4f3f1",
+  secondaryFixed:   "#abf3bf",
+  secondaryFixedDim:"#90d6a4",
+  error:            "#ba1a1a",
+} as const;
+
 type Phase = "loading" | "needsConfig" | "join" | "ready" | "notFound" | "error";
 
+// ─── Main component ─────────────────────────────────────────────────────────
 export default function SessionClient({ sessionId }: { sessionId: string }) {
   const [phase, setPhase] = useState<Phase>("loading");
-  const [errorMessage, setErrorMessage] = useState<string>("");
+  const [errorMessage, setErrorMessage] = useState("");
   const [uid, setUid] = useState<string | null>(null);
-
   const [session, setSession] = useState<LiveSession | null>(null);
   const [participants, setParticipants] = useState<SessionParticipant[]>([]);
   const [claims, setClaims] = useState<SessionClaim[]>([]);
 
-  // Join form state
+  // Join form
   const [nameInput, setNameInput] = useState("");
   const [colorIndex, setColorIndex] = useState(0);
   const [joining, setJoining] = useState(false);
 
-  // Initialize anonymous auth + listeners.
+  // Sheet state
+  const [selectedItem, setSelectedItem] = useState<SessionItem | null>(null);
+  const [claimQty, setClaimQty] = useState(0);
+  const [maxClaimQty, setMaxClaimQty] = useState(0); // snapshotted at sheet open — never drifts
+  const [reviewOpen, setReviewOpen] = useState(false);
+
+  // ── Firebase listeners ──────────────────────────────────────────────────
   useEffect(() => {
-    if (!isFirebaseConfigured()) {
-      setPhase("needsConfig");
-      return;
-    }
+    if (!isFirebaseConfigured()) { setPhase("needsConfig"); return; }
 
     let unsubSession = () => {};
     let unsubParticipants = () => {};
@@ -65,62 +88,33 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
         setUid(user.uid);
 
         const db = getDb();
-        const sessionRef = doc(db, "sessions", sessionId);
 
-        unsubSession = onSnapshot(
-          sessionRef,
-          (snap) => {
-            if (!snap.exists()) {
-              setSession(null);
-              setPhase("notFound");
-              return;
-            }
-            const data = snap.data();
-            setSession({
-              id: snap.id,
-              hostUserId: data.hostUserId,
-              status: data.status,
-              currency: data.currency ?? "EGP",
-              items: (data.items ?? []) as SessionItem[],
-              additionalCharges: data.additionalCharges ?? [],
-              fixedCharges: data.fixedCharges ?? [],
-              createdAt: data.createdAt ?? null,
-              expiresAt: data.expiresAt,
-            });
-          },
-          (err) => {
-            console.error("session listener error", err);
-            setErrorMessage(err.message);
-            setPhase("error");
-          }
-        );
+        unsubSession = onSnapshot(doc(db, "sessions", sessionId), (snap) => {
+          if (!snap.exists()) { setSession(null); setPhase("notFound"); return; }
+          const d = snap.data();
+          setSession({
+            id: snap.id,
+            hostUserId: d.hostUserId,
+            status: d.status,
+            currency: d.currency ?? "EGP",
+            items: (d.items ?? []) as SessionItem[],
+            additionalCharges: d.additionalCharges ?? [],
+            fixedCharges: d.fixedCharges ?? [],
+            createdAt: d.createdAt ?? null,
+            expiresAt: d.expiresAt,
+          });
+        }, (err) => { setErrorMessage(err.message); setPhase("error"); });
 
         unsubParticipants = onSnapshot(
           collection(db, "sessions", sessionId, "participants"),
-          (snap) => {
-            setParticipants(
-              snap.docs.map((d) => d.data() as SessionParticipant)
-            );
-          },
-          (err) => {
-            console.error("participants listener error", err);
-            setErrorMessage(err.message);
-            setPhase("error");
-          }
+          (snap) => setParticipants(snap.docs.map((d) => d.data() as SessionParticipant)),
+          (err) => { setErrorMessage(err.message); setPhase("error"); }
         );
 
         unsubClaims = onSnapshot(
           collection(db, "sessions", sessionId, "claims"),
-          (snap) => {
-            setClaims(
-              snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<SessionClaim, "id">) }))
-            );
-          },
-          (err) => {
-            console.error("claims listener error", err);
-            setErrorMessage(err.message);
-            setPhase("error");
-          }
+          (snap) => setClaims(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<SessionClaim, "id">) }))),
+          (err) => { setErrorMessage(err.message); setPhase("error"); }
         );
       } catch (err) {
         setErrorMessage(err instanceof Error ? err.message : "Something went wrong.");
@@ -128,15 +122,10 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
       }
     })();
 
-    return () => {
-      cancelled = true;
-      unsubSession();
-      unsubParticipants();
-      unsubClaims();
-    };
+    return () => { cancelled = true; unsubSession(); unsubParticipants(); unsubClaims(); };
   }, [sessionId]);
 
-  // Derive phase from loaded data + whether we've joined.
+  // ── Derive phase ────────────────────────────────────────────────────────
   const hasJoined = useMemo(
     () => Boolean(uid && participants.some((p) => p.uid === uid)),
     [uid, participants]
@@ -144,29 +133,41 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
 
   useEffect(() => {
     if (phase === "needsConfig" || phase === "notFound" || phase === "error") return;
-    if (!session) {
-      setPhase("loading");
-      return;
-    }
+    if (!session) { setPhase("loading"); return; }
     setPhase(hasJoined ? "ready" : "join");
   }, [session, hasJoined, phase]);
 
-  // Pre-pick a free color when arriving at the join screen.
   useEffect(() => {
-    if (phase === "join") {
-      setColorIndex(participants.length);
-    }
+    if (phase === "join") setColorIndex(participants.length);
   }, [phase, participants.length]);
 
+  // ── Computed values ─────────────────────────────────────────────────────
   const breakdowns = useMemo(
     () => (session ? computeBreakdowns(session, participants, claims) : []),
     [session, participants, claims]
   );
   const myBreakdown = breakdowns.find((b) => b.uid === uid);
+  const assignedItemCount = useMemo(
+    () => session?.items.filter((item) => claims.some((c) => c.itemId === item.id && c.quantity > 0)).length ?? 0,
+    [session, claims]
+  );
+  const totalItems = session?.items.length ?? 0;
+
+  // Full bill total with all charges (mirrors iOS SplitCalculator.billTotal).
+  const fullBillTotal = useMemo(() => (session ? billTotal(session) : 0), [session]);
+  // Amount covered by current assignments (sum of all per-person totals).
+  const assignedAmount = useMemo(
+    () => breakdowns.reduce((sum, b) => sum + b.total, 0),
+    [breakdowns]
+  );
+  // Remaining = full bill - what's already assigned, including proportional charges.
+  const remainingTotal = Math.max(0, fullBillTotal - assignedAmount);
+
   const isExpired = session ? session.expiresAt.toDate() < new Date() : false;
   const isSettled = session?.status === "settled";
   const readOnly = isSettled || isExpired;
 
+  // ── Actions ──────────────────────────────────────────────────────────────
   async function handleJoin() {
     if (!uid || !nameInput.trim()) return;
     setJoining(true);
@@ -202,200 +203,352 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
     }
   }
 
-  // ---- Render states -------------------------------------------------------
+  function openItemSheet(item: SessionItem) {
+    if (readOnly) return;
+    const mine = quantityForParticipant(item.id, uid ?? "", claims);
+    const remaining = remainingQuantity(item, claims);
+    setClaimQty(mine);
+    // Snapshot the max once: my current claim + unclaimed by others. Fixed for the sheet lifetime.
+    setMaxClaimQty(mine + remaining);
+    setSelectedItem(item);
+  }
 
+  async function confirmClaim() {
+    if (!selectedItem) return;
+    await setMyClaim(selectedItem, claimQty);
+    setSelectedItem(null);
+  }
+
+  // ─── Phase screens ────────────────────────────────────────────────────────
   if (phase === "needsConfig") {
     return (
-      <Centered>
-        <Card>
-          <h1 className="text-xl font-bold text-gray-900 mb-2">Live sessions not configured</h1>
-          <p className="text-gray-600 text-sm">
-            Set the <code>NEXT_PUBLIC_FIREBASE_*</code> environment variables to enable
-            real-time bill splitting.
-          </p>
-        </Card>
-      </Centered>
+      <FullPage>
+        <StatusCard title="Not configured" message="Set the NEXT_PUBLIC_FIREBASE_* environment variables to enable live sessions." />
+      </FullPage>
     );
   }
-
   if (phase === "loading") {
     return (
-      <Centered>
+      <FullPage>
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4" />
-          <p className="text-white/80">Loading your bill…</p>
+          <Spinner />
+          <p className="mt-4 text-sm" style={{ color: "rgba(255,255,255,0.6)" }}>Loading your bill…</p>
         </div>
-      </Centered>
+      </FullPage>
     );
   }
-
   if (phase === "notFound") {
     return (
-      <Centered>
-        <Card>
-          <h1 className="text-xl font-bold text-gray-900 mb-2">Bill not found</h1>
-          <p className="text-gray-600 text-sm mb-6">
-            This link may have expired or been settled. Ask the host for a new one.
-          </p>
-          <DownloadButton />
-        </Card>
-      </Centered>
+      <FullPage>
+        <StatusCard
+          title="Bill not found"
+          message="This link may have expired or already been settled. Ask the host for a new one."
+          cta={{ label: "Get the App", href: APP_STORE_URL }}
+        />
+      </FullPage>
     );
   }
-
   if (phase === "error") {
     return (
-      <Centered>
-        <Card>
-          <h1 className="text-xl font-bold text-gray-900 mb-2">Something went wrong</h1>
-          <p className="text-gray-600 text-sm break-words">{errorMessage}</p>
-        </Card>
-      </Centered>
+      <FullPage>
+        <StatusCard title="Something went wrong" message={errorMessage} />
+      </FullPage>
     );
   }
 
+  // ─── Join screen ──────────────────────────────────────────────────────────
   if (phase === "join") {
     return (
-      <Centered>
-        <Card>
-          <h1 className="text-2xl font-bold text-gray-900 mb-1">Join the split</h1>
-          <p className="text-gray-600 text-sm mb-6">
-            Enter your name so everyone knows whose items are whose.
-          </p>
-          <input
-            value={nameInput}
-            onChange={(e) => setNameInput(e.target.value)}
-            placeholder="Your name"
-            maxLength={40}
-            className="w-full border border-gray-300 rounded-lg px-4 py-3 mb-4 text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#2D4B42]"
-          />
-          <div className="flex flex-wrap gap-2 mb-6">
-            {Array.from({ length: 8 }).map((_, i) => {
-              const c = colorForIndex(i);
-              return (
+      <div className="min-h-screen flex flex-col" style={{ backgroundColor: C.surface }}>
+        {/* Top bar */}
+        <header
+          className="flex items-center justify-between px-4 h-14 sticky top-0 z-10"
+          style={{ backgroundColor: C.surface, borderBottom: `1px solid ${C.outlineVariant}` }}
+        >
+          <div className="flex items-center gap-2">
+            <img src="/snap-split-logo.png" alt="Snap Split" className="w-7 h-7 rounded-lg object-contain" />
+            <span className="font-bold" style={{ color: C.primary }}>Snap Split</span>
+          </div>
+          <a
+            href={APP_STORE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs font-semibold rounded-full px-3 py-1.5 transition-colors"
+            style={{ color: C.primary, backgroundColor: C.surfaceContainerHigh }}
+          >
+            Open App
+          </a>
+        </header>
+
+        <main className="flex-1 flex items-center justify-center p-6">
+          <div className="w-full max-w-sm">
+            {/* Invite card */}
+            <div className="text-center mb-8">
+              <div
+                className="w-16 h-16 rounded-[16px] mx-auto mb-4 shadow-lg overflow-hidden"
+              >
+                <img src="/snap-split-logo.png" alt="Snap Split" className="w-full h-full object-cover" />
+              </div>
+              <h1 className="text-2xl font-bold mb-2" style={{ color: C.primary }}>
+                You&apos;re invited!
+              </h1>
+              <p className="text-sm" style={{ color: C.onSurfaceVariant }}>
+                Enter your name so your group knows whose items are whose.
+              </p>
+            </div>
+
+            {/* Name input */}
+            <input
+              value={nameInput}
+              onChange={(e) => setNameInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && !joining && nameInput.trim() && handleJoin()}
+              placeholder="Your name"
+              maxLength={40}
+              className="w-full rounded-xl px-4 py-3 mb-4 text-base outline-none transition-all"
+              style={{
+                backgroundColor: C.surfaceContainerLow,
+                border: `1.5px solid ${nameInput.trim() ? C.primary : C.outlineVariant}`,
+                color: C.onSurface,
+              }}
+            />
+
+            {/* Color picker */}
+            <p className="text-xs font-semibold mb-2" style={{ color: C.onSurfaceVariant }}>
+              Pick your colour
+            </p>
+            <div className="flex flex-wrap gap-2 mb-6">
+              {COLOR_PALETTE.slice(0, 8).map((color, i) => (
                 <button
                   key={i}
                   onClick={() => setColorIndex(i)}
-                  aria-label={`Pick color ${i + 1}`}
-                  className="w-8 h-8 rounded-full transition-transform"
+                  className="w-9 h-9 rounded-full transition-transform focus:outline-none"
                   style={{
-                    backgroundColor: c,
+                    backgroundColor: color,
                     transform: i === colorIndex ? "scale(1.2)" : "scale(1)",
-                    outline: i === colorIndex ? "2px solid #2D4B42" : "none",
+                    outline: i === colorIndex ? `3px solid ${C.primary}` : "none",
                     outlineOffset: 2,
                   }}
+                  aria-label={`Color option ${i + 1}`}
                 />
-              );
-            })}
+              ))}
+            </div>
+
+            {/* Join CTA */}
+            <button
+              onClick={handleJoin}
+              disabled={!nameInput.trim() || joining}
+              className="w-full h-14 rounded-full font-bold text-base text-white transition-all active:scale-95"
+              style={{
+                backgroundColor: nameInput.trim() && !joining ? C.primary : C.outlineVariant,
+                cursor: nameInput.trim() && !joining ? "pointer" : "not-allowed",
+              }}
+            >
+              {joining ? (
+                <span className="flex items-center justify-center gap-2">
+                  <SmallSpinner /> Joining…
+                </span>
+              ) : (
+                "Join Session"
+              )}
+            </button>
           </div>
-          <button
-            onClick={handleJoin}
-            disabled={!nameInput.trim() || joining}
-            className="w-full bg-[#2D4B42] text-white font-semibold rounded-lg py-3 disabled:opacity-50"
-          >
-            {joining ? "Joining…" : "Join split"}
-          </button>
-        </Card>
-      </Centered>
+        </main>
+      </div>
     );
   }
 
-  // phase === "ready"
+  // ─── Ready / SplitHub ─────────────────────────────────────────────────────
   if (!session) return null;
 
-  return (
-    <div className="min-h-screen" style={{ backgroundColor: BG }}>
-      <div className="max-w-2xl mx-auto p-4 pb-32">
-        <header className="text-white py-4">
-          <h1 className="text-2xl font-bold">Split the bill</h1>
-          <p className="text-white/70 text-sm">
-            {participants.length} {participants.length === 1 ? "person" : "people"} here
-            {readOnly ? " · settled" : " · tap items to claim your share"}
-          </p>
-        </header>
+  const progressPct = totalItems > 0 ? (assignedItemCount / totalItems) * 100 : 0;
 
-        {/* Participant avatars */}
-        <div className="flex flex-wrap gap-2 mb-4">
-          {participants.map((p) => (
+  return (
+    <div className="min-h-screen flex flex-col" style={{ backgroundColor: C.surface }}>
+      {/* Sticky top nav */}
+      <header
+        className="sticky top-0 z-50 flex items-center justify-between px-4 h-14 backdrop-blur-md"
+        style={{
+          backgroundColor: "rgba(250,249,247,0.85)",
+          borderBottom: `1px solid ${C.outlineVariant}`,
+        }}
+      >
+        {/* Left placeholder to balance center title */}
+        <div className="w-10" />
+        <h1 className="font-bold text-lg" style={{ color: C.primary }}>
+          Snap Split
+        </h1>
+        <a
+          href={APP_STORE_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs font-semibold rounded-full px-3 py-1.5 transition-colors"
+          style={{ color: C.primary, backgroundColor: C.surfaceContainerHigh }}
+        >
+          Open App
+        </a>
+      </header>
+
+      {/* Scrollable content */}
+      <main className="flex-1 px-4 pb-40 max-w-2xl mx-auto w-full">
+        {/* ── Progress card ── */}
+        <section
+          className="mt-4 rounded-[20px] p-5"
+          style={{
+            backgroundColor: "#fff",
+            boxShadow: "0 4px 20px rgba(22,52,44,0.05)",
+          }}
+        >
+          <div className="flex justify-between items-end mb-2">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide mb-0.5" style={{ color: C.onSurfaceVariant }}>
+                Progress
+              </p>
+              <p className="text-xl font-bold" style={{ color: C.primary }}>
+                {assignedItemCount} / {totalItems} items claimed
+              </p>
+            </div>
+            <div className="text-right">
+              <p className="text-xs" style={{ color: C.onSurfaceVariant }}>Remaining</p>
+              <p className="text-lg font-bold" style={{ color: C.primary }}>
+                {formatMoney(remainingTotal, session.currency)}
+              </p>
+            </div>
+          </div>
+          <div className="h-2 w-full rounded-full overflow-hidden" style={{ backgroundColor: `${C.secondaryFixed}50` }}>
             <div
-              key={p.uid}
-              className="flex items-center gap-2 bg-white/10 rounded-full pl-1 pr-3 py-1"
-            >
-              <span
-                className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white"
-                style={{ backgroundColor: p.colorHex }}
-              >
-                {(p.displayName || "?").slice(0, 2).toUpperCase()}
-              </span>
-              <span className="text-white text-sm">
-                {p.uid === uid ? "You" : p.displayName}
+              className="h-full rounded-full transition-all duration-700"
+              style={{ width: `${progressPct}%`, backgroundColor: C.secondary }}
+            />
+          </div>
+        </section>
+
+        {/* ── Participant avatars ── */}
+        <section className="mt-6 flex gap-4 overflow-x-auto hide-scrollbar py-2">
+          {participants.map((p) => (
+            <div key={p.uid} className="flex flex-col items-center flex-shrink-0">
+              <Avatar name={p.displayName} color={p.colorHex} size={52} />
+              <span className="text-xs mt-1 font-semibold" style={{ color: p.uid === uid ? C.primary : C.onSurfaceVariant }}>
+                {p.uid === uid ? "You" : p.displayName.split(" ")[0]}
               </span>
             </div>
           ))}
+        </section>
+
+        {/* ── Settled / expired banner ── */}
+        {readOnly && (
+          <div
+            className="mt-4 rounded-2xl px-4 py-3 text-sm font-semibold text-center"
+            style={{ backgroundColor: "#fef3cd", color: "#856404" }}
+          >
+            {isSettled ? "This bill has been settled." : "This session has expired."}
+          </div>
+        )}
+
+        {/* ── Items ── */}
+        <div className="mt-6 flex justify-between items-center px-1 mb-3">
+          <h2 className="text-xl font-bold" style={{ color: C.primary }}>Items</h2>
         </div>
 
-        {/* Items */}
         <div className="space-y-3">
           {session.items.map((item) => {
             const mine = quantityForParticipant(item.id, uid ?? "", claims);
             const remaining = remainingQuantity(item, claims);
-            const othersClaimed = item.originalQuantity - remaining - mine;
-            const maxForMe = Math.max(0, item.originalQuantity - othersClaimed);
+            const fullyAssigned = remaining < 0.001;
             const claimers = claims.filter((c) => c.itemId === item.id && c.quantity > 0);
+            const iHaveClaim = mine > 0;
+
             return (
-              <div key={item.id} className="bg-white rounded-xl p-4">
-                <div className="flex justify-between items-start gap-3">
-                  <div className="min-w-0">
-                    <p className="font-semibold text-gray-900 truncate">{item.name}</p>
-                    <p className="text-gray-500 text-sm">
-                      {formatMoney(item.totalPrice, session.currency)}
-                      {item.originalQuantity > 1 ? ` · qty ${item.originalQuantity}` : ""}
+              <div
+                key={item.id}
+                className="rounded-[20px] p-5 cursor-pointer transition-all"
+                style={{
+                  backgroundColor: "#fff",
+                  border: fullyAssigned
+                    ? `2px solid ${C.secondaryFixedDim}`
+                    : `2px dashed ${C.outlineVariant}`,
+                  boxShadow: "0 2px 15px rgba(22,52,44,0.04)",
+                }}
+                onClick={() => openItemSheet(item)}
+              >
+                {/* Item header */}
+                <div className="flex justify-between items-start">
+                  <div className="min-w-0 mr-3">
+                    <h4 className="font-semibold text-base truncate" style={{ color: C.primary }}>
+                      {item.name}
+                    </h4>
+                    <p className="text-xs mt-0.5" style={{ color: C.onSurfaceVariant }}>
+                      {item.originalQuantity > 1 ? `Qty ${item.originalQuantity} · ` : ""}{formatMoney(item.totalPrice, session.currency)}
+                    </p>
+                    <p
+                      className="text-xs font-semibold mt-0.5"
+                      style={{ color: fullyAssigned ? C.secondary : C.error }}
+                    >
+                      {fullyAssigned ? "Fully claimed" : claimers.length > 0 ? `${trim(remaining)} left` : "Unassigned"}
                     </p>
                   </div>
-                  <span
-                    className="text-xs font-semibold px-2 py-1 rounded-full whitespace-nowrap"
-                    style={{
-                      backgroundColor: remaining < 0.001 ? "#E6F7F0" : "#FDECEC",
-                      color: remaining < 0.001 ? "#00875A" : "#C0392B",
-                    }}
-                  >
-                    {remaining < 0.001 ? "Fully claimed" : `${trim(remaining)} left`}
+                  <span className="text-lg font-bold flex-shrink-0" style={{ color: C.primary }}>
+                    {formatMoney(item.totalPrice, session.currency)}
                   </span>
                 </div>
 
                 {/* Who claimed */}
                 {claimers.length > 0 && (
-                  <div className="flex flex-wrap gap-1 mt-2">
+                  <div className="flex flex-wrap gap-1.5 mt-3">
                     {claimers.map((c) => {
                       const p = participants.find((x) => x.uid === c.participantUid);
                       return (
                         <span
                           key={c.id}
-                          className="text-xs px-2 py-0.5 rounded-full text-white"
+                          className="text-xs px-2 py-0.5 rounded-full text-white font-semibold"
                           style={{ backgroundColor: p?.colorHex ?? "#888" }}
                         >
-                          {(c.participantUid === uid ? "You" : p?.displayName ?? "?")} ·{" "}
-                          {trim(c.quantity)}
+                          {c.participantUid === uid ? "You" : (p?.displayName ?? "?")} · {formatMoney((c.quantity / item.originalQuantity) * item.totalPrice, session.currency)}
                         </span>
                       );
                     })}
                   </div>
                 )}
 
-                {/* Claim controls */}
+                {/* Quick actions */}
                 {!readOnly && (
-                  <div className="flex items-center gap-2 mt-3">
-                    <Stepper
-                      value={mine}
-                      max={maxForMe}
-                      onChange={(v) => setMyClaim(item, v)}
-                    />
-                    {remaining > 0.001 && (
+                  <div className="flex items-center justify-between mt-4">
+                    <div className="flex gap-1">
+                      {claimers.map((c) => {
+                        const p = participants.find((x) => x.uid === c.participantUid);
+                        return (
+                          <div
+                            key={c.id}
+                            className="w-2.5 h-2.5 rounded-full"
+                            style={{ backgroundColor: p?.colorHex ?? "#ddd" }}
+                          />
+                        );
+                      })}
+                      {remaining > 0.001 && Array.from({ length: Math.min(Math.round(remaining), 5) }).map((_, i) => (
+                        <div key={i} className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: C.outlineVariant }} />
+                      ))}
+                    </div>
+                    {!iHaveClaim && remaining > 0.001 && (
                       <button
-                        onClick={() => setMyClaim(item, mine + remaining)}
-                        className="text-sm font-medium text-[#2D4B42] underline"
+                        className="text-xs font-bold rounded-full px-4 py-1.5 border transition-colors"
+                        style={{ color: C.primary, borderColor: C.primary }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setMyClaim(item, 1);
+                        }}
                       >
-                        Claim remaining
+                        Add myself
+                      </button>
+                    )}
+                    {iHaveClaim && (
+                      <button
+                        className="text-xs font-bold rounded-full px-4 py-1.5 transition-colors"
+                        style={{ color: C.onSecondaryContainer, backgroundColor: C.secondaryContainer }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openItemSheet(item);
+                        }}
+                      >
+                        Edit ({trim(mine)})
                       </button>
                     )}
                   </div>
@@ -405,49 +558,157 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
           })}
         </div>
 
-        {/* Everyone's totals */}
-        <h2 className="text-white font-semibold mt-6 mb-2">Who owes what</h2>
-        <div className="space-y-2">
-          {breakdowns.map((b) => (
-            <div
-              key={b.uid}
-              className="flex justify-between items-center bg-white/10 rounded-lg px-4 py-3"
-            >
-              <div className="flex items-center gap-2">
-                <span
-                  className="w-3 h-3 rounded-full"
-                  style={{ backgroundColor: b.colorHex }}
-                />
-                <span className="text-white">
-                  {b.uid === uid ? "You" : b.displayName}
-                </span>
-              </div>
-              <span className="text-white font-semibold">
-                {formatMoney(b.total, session.currency)}
-              </span>
+        {/* ── Breakdowns ── */}
+        {breakdowns.length > 0 && (
+          <>
+            <h2 className="text-xl font-bold mt-8 mb-3" style={{ color: C.primary }}>Who owes what</h2>
+            <div className="space-y-2">
+              {breakdowns.map((b) => (
+                <div
+                  key={b.uid}
+                  className="flex justify-between items-center rounded-xl px-4 py-3"
+                  style={{ backgroundColor: b.uid === uid ? C.primaryContainer : C.surfaceContainerHigh }}
+                >
+                  <div className="flex items-center gap-2">
+                    <Avatar name={b.displayName} color={b.colorHex} size={28} />
+                    <span
+                      className="text-sm font-semibold"
+                      style={{ color: b.uid === uid ? "#fff" : C.onSurface }}
+                    >
+                      {b.uid === uid ? "You" : b.displayName}
+                    </span>
+                  </div>
+                  <span
+                    className="font-bold"
+                    style={{ color: b.uid === uid ? "#fff" : C.onSurface }}
+                  >
+                    {formatMoney(b.total, session.currency)}
+                  </span>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-      </div>
+          </>
+        )}
+      </main>
 
-      {/* Sticky "you owe" bar */}
+      {/* ── Sticky "You owe" bar ── */}
       {myBreakdown && (
-        <div className="fixed bottom-0 inset-x-0 bg-white shadow-[0_-4px_12px_rgba(0,0,0,0.1)]">
-          <div className="max-w-2xl mx-auto px-4 py-3 flex justify-between items-center">
-            <span className="text-gray-600">You owe</span>
-            <span className="text-2xl font-bold text-gray-900">
-              {formatMoney(myBreakdown.total, session.currency)}
-            </span>
+        <div
+          className="fixed z-40"
+          style={{ bottom: "0", left: 0, right: 0 }}
+        >
+          <div className="max-w-2xl mx-auto px-4 pb-4 pt-2">
+            <div
+              className="flex justify-between items-center rounded-2xl p-4"
+              style={{
+                backgroundColor: C.primary,
+                boxShadow: "0 -4px 20px rgba(22,52,44,0.15)",
+              }}
+            >
+              <div className="flex items-center gap-3">
+                <div
+                  className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0"
+                  style={{ backgroundColor: C.primaryContainer }}
+                >
+                  <ReceiptIcon />
+                </div>
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-wider opacity-70 text-white">Your Total</p>
+                  <p className="text-base font-bold text-white">You owe {formatMoney(myBreakdown.total, session.currency)}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setReviewOpen(true)}
+                className="font-bold text-sm rounded-xl px-5 py-2.5 active:scale-95 transition-all"
+                style={{ backgroundColor: C.secondaryContainer, color: C.onSecondaryContainer }}
+              >
+                Review Bill
+              </button>
+            </div>
           </div>
         </div>
+      )}
+
+      {/* ── Item claim bottom sheet ── */}
+      {selectedItem && (
+        <BottomSheet onClose={() => setSelectedItem(null)}>
+          <div>
+            <div className="flex justify-between items-start mb-6">
+              <div>
+                <h3 className="text-xl font-bold" style={{ color: C.primary }}>{selectedItem.name}</h3>
+                <p className="text-sm mt-0.5" style={{ color: C.onSurfaceVariant }}>
+                  {formatMoney(selectedItem.totalPrice, session.currency)}
+                  {selectedItem.originalQuantity > 1 ? ` · qty ${selectedItem.originalQuantity}` : ""}
+                </p>
+              </div>
+            </div>
+
+            {/* Qty stepper */}
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm font-semibold" style={{ color: C.onSurfaceVariant }}>Your quantity</span>
+              <ClaimStepper
+                value={claimQty}
+                max={maxClaimQty}
+                onChange={setClaimQty}
+              />
+            </div>
+
+            {/* Claim remaining shortcut */}
+            {claimQty < maxClaimQty && (
+              <button
+                onClick={() => setClaimQty(maxClaimQty)}
+                className="w-full text-sm font-semibold py-2 mb-4 rounded-xl transition-colors"
+                style={{ color: C.secondary, backgroundColor: `${C.secondaryContainer}60` }}
+              >
+                Claim all remaining ({trim(maxClaimQty - claimQty)})
+              </button>
+            )}
+
+            <button
+              onClick={confirmClaim}
+              className="w-full h-12 rounded-full font-bold text-white transition-all active:scale-95"
+              style={{ backgroundColor: C.primary }}
+            >
+              Confirm
+            </button>
+          </div>
+        </BottomSheet>
+      )}
+
+      {/* ── Review bill bottom sheet ── */}
+      {reviewOpen && session && (
+        <BottomSheet onClose={() => setReviewOpen(false)}>
+          <ReviewSheet
+            breakdowns={breakdowns}
+            currency={session.currency}
+            uid={uid ?? ""}
+          />
+        </BottomSheet>
       )}
     </div>
   );
 }
 
-// ---- Small UI helpers ------------------------------------------------------
+// ─── Sub-components ──────────────────────────────────────────────────────────
 
-function Stepper({
+function Avatar({ name, color, size }: { name: string; color: string; size: number }) {
+  const initials = name
+    .split(" ")
+    .map((w) => w[0])
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
+  return (
+    <div
+      className="rounded-full flex items-center justify-center font-bold text-white flex-shrink-0"
+      style={{ width: size, height: size, backgroundColor: color, fontSize: size * 0.32 }}
+    >
+      {initials}
+    </div>
+  );
+}
+
+function ClaimStepper({
   value,
   max,
   onChange,
@@ -456,24 +717,30 @@ function Stepper({
   max: number;
   onChange: (v: number) => void;
 }) {
-  const dec = () => onChange(Math.max(0, round(value - 1)));
-  const inc = () => onChange(Math.min(max, round(value + 1)));
   return (
-    <div className="flex items-center border border-gray-300 rounded-lg overflow-hidden">
+    <div
+      className="flex items-center rounded-xl overflow-hidden"
+      style={{ border: `1.5px solid ${C.outlineVariant}` }}
+    >
       <button
-        onClick={dec}
+        onClick={() => onChange(Math.max(0, round(value - 1)))}
         disabled={value <= 0}
-        className="px-3 py-1 text-lg text-gray-700 disabled:opacity-30"
-        aria-label="Claim one less"
+        className="px-4 py-2 text-lg font-bold transition-colors"
+        style={{ color: value <= 0 ? C.outlineVariant : C.primary }}
       >
         −
       </button>
-      <span className="px-3 min-w-[2.5rem] text-center text-gray-900">{trim(value)}</span>
+      <span
+        className="px-3 min-w-[2.5rem] text-center font-semibold"
+        style={{ color: C.onSurface }}
+      >
+        {trim(value)}
+      </span>
       <button
-        onClick={inc}
+        onClick={() => onChange(Math.min(max, round(value + 1)))}
         disabled={value >= max - 0.001}
-        className="px-3 py-1 text-lg text-gray-700 disabled:opacity-30"
-        aria-label="Claim one more"
+        className="px-4 py-2 text-lg font-bold transition-colors"
+        style={{ color: value >= max - 0.001 ? C.outlineVariant : C.primary }}
       >
         +
       </button>
@@ -481,34 +748,171 @@ function Stepper({
   );
 }
 
-function Centered({ children }: { children: React.ReactNode }) {
+function BottomSheet({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+  const sheetRef = useRef<HTMLDivElement>(null);
+
+  // Close on backdrop click
+  const handleBackdrop = useCallback(
+    (e: React.MouseEvent) => { if (e.target === e.currentTarget) onClose(); },
+    [onClose]
+  );
+
   return (
     <div
-      className="min-h-screen flex items-center justify-center p-4"
-      style={{ backgroundColor: BG }}
+      className="fixed inset-0 z-[60] flex items-end justify-center"
+      style={{ backgroundColor: "rgba(22,52,44,0.5)" }}
+      onClick={handleBackdrop}
+    >
+      <div
+        ref={sheetRef}
+        className="w-full max-w-2xl rounded-t-[32px] px-6 pt-4 pb-8"
+        style={{ backgroundColor: C.surface }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Handle */}
+        <div
+          className="w-12 h-1.5 rounded-full mx-auto mb-6"
+          style={{ backgroundColor: C.outlineVariant }}
+        />
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ReviewSheet({
+  breakdowns,
+  currency,
+  uid,
+}: {
+  breakdowns: PersonBreakdown[];
+  currency: string;
+  uid: string;
+}) {
+  return (
+    <div>
+      <h3 className="text-xl font-bold mb-6" style={{ color: C.primary }}>Bill Breakdown</h3>
+      <div className="space-y-4">
+        {breakdowns.map((b) => (
+          <div key={b.uid}>
+            <div className="flex items-center gap-2 mb-2">
+              <Avatar name={b.displayName} color={b.colorHex} size={28} />
+              <span className="font-bold" style={{ color: C.primary }}>
+                {b.uid === uid ? "You" : b.displayName}
+              </span>
+            </div>
+            <div className="ml-9 space-y-1">
+              {b.items.map((li) => (
+                <div key={li.name} className="flex justify-between text-sm">
+                  <span style={{ color: C.onSurfaceVariant }}>{li.name} ×{trim(li.quantity)}</span>
+                  <span style={{ color: C.onSurface }}>{formatMoney(li.price, currency)}</span>
+                </div>
+              ))}
+              {b.serviceShare > 0.001 && (
+                <div className="flex justify-between text-sm">
+                  <span style={{ color: C.onSurfaceVariant }}>Service</span>
+                  <span style={{ color: C.onSurface }}>{formatMoney(b.serviceShare, currency)}</span>
+                </div>
+              )}
+              {b.vatShare > 0.001 && (
+                <div className="flex justify-between text-sm">
+                  <span style={{ color: C.onSurfaceVariant }}>VAT</span>
+                  <span style={{ color: C.onSurface }}>{formatMoney(b.vatShare, currency)}</span>
+                </div>
+              )}
+              {b.fixedShare > 0.001 && (
+                <div className="flex justify-between text-sm">
+                  <span style={{ color: C.onSurfaceVariant }}>Fixed charges</span>
+                  <span style={{ color: C.onSurface }}>{formatMoney(b.fixedShare, currency)}</span>
+                </div>
+              )}
+              <div
+                className="flex justify-between text-sm font-bold pt-1 mt-1"
+                style={{ borderTop: `1px solid ${C.outlineVariant}` }}
+              >
+                <span style={{ color: C.primary }}>Total</span>
+                <span style={{ color: C.primary }}>{formatMoney(b.total, currency)}</span>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FullPage({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      className="min-h-screen flex items-center justify-center p-6"
+      style={{ background: `linear-gradient(160deg, ${C.primary} 0%, #1f4a3a 55%, ${C.primaryContainer} 100%)` }}
     >
       {children}
     </div>
   );
 }
 
-function Card({ children }: { children: React.ReactNode }) {
+function StatusCard({
+  title,
+  message,
+  cta,
+}: {
+  title: string;
+  message: string;
+  cta?: { label: string; href: string };
+}) {
   return (
-    <div className="bg-white rounded-2xl shadow-xl p-8 max-w-md w-full text-center">
-      {children}
+    <div
+      className="rounded-2xl p-8 max-w-sm w-full text-center shadow-2xl"
+      style={{ backgroundColor: C.surface }}
+    >
+      <div
+        className="w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-4"
+        style={{ backgroundColor: C.surfaceContainerHigh }}
+      >
+        <img src="/snap-split-logo.png" alt="" className="w-7 h-7 rounded-lg object-contain" />
+      </div>
+      <h1 className="text-xl font-bold mb-2" style={{ color: C.primary }}>{title}</h1>
+      <p className="text-sm mb-6" style={{ color: C.onSurfaceVariant }}>{message}</p>
+      {cta && (
+        <a
+          href={cta.href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-block font-bold text-sm rounded-full px-6 py-3 text-white transition-colors"
+          style={{ backgroundColor: C.primary }}
+        >
+          {cta.label}
+        </a>
+      )}
     </div>
   );
 }
 
-function DownloadButton() {
+function Spinner() {
   return (
-    <button
-      onClick={() => window.open(APP_STORE_URL, "_blank")}
-      className="mx-auto block hover:opacity-80 transition-opacity"
-      aria-label="Download Snap Split on the App Store"
-    >
-      <img src="/app-store-badge.webp" alt="Download on the App Store" className="h-14 w-auto" />
-    </button>
+    <div
+      className="w-12 h-12 rounded-full border-4 border-t-transparent animate-spin mx-auto"
+      style={{ borderColor: `rgba(255,255,255,0.3)`, borderTopColor: "rgba(255,255,255,0.9)" }}
+    />
+  );
+}
+
+function SmallSpinner() {
+  return (
+    <div
+      className="w-4 h-4 rounded-full border-2 border-t-transparent animate-spin"
+      style={{ borderColor: "rgba(255,255,255,0.4)", borderTopColor: "white" }}
+    />
+  );
+}
+
+function ReceiptIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+      <path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1z" />
+      <path d="M16 8H8M16 12H8M12 16H8" />
+    </svg>
   );
 }
 
