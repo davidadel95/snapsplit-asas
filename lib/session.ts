@@ -64,6 +64,7 @@ export function claimDocId(participantUid: string, itemId: string): string {
 export interface PersonLineItem {
   name: string;
   quantity: number;
+  originalQuantity: number;
   price: number;
 }
 
@@ -173,7 +174,7 @@ export function computeBreakdowns(
       if (qty <= 0) continue;
       const price = pricePerUnit(item) * qty;
       subtotal += price;
-      lineItems.push({ name: item.name, quantity: qty, price });
+      lineItems.push({ name: item.name, quantity: qty, originalQuantity: item.originalQuantity, price });
     }
 
     const proportion = assignedSubtotal > 0 ? subtotal / assignedSubtotal : 0;

@@ -207,13 +207,15 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
 
   async function setMyClaim(item: SessionItem, quantity: number) {
     if (!uid || !session || readOnly) return;
+    // Guard: never write more than the item's original quantity.
+    const capped = Math.min(Math.max(0, quantity), item.originalQuantity);
     const db = getDb();
     const ref = doc(db, "sessions", sessionId, "claims", `${uid}_${item.id}`);
     try {
-      if (quantity <= 0) {
+      if (capped <= 0) {
         await deleteDoc(ref);
       } else {
-        await setDoc(ref, { itemId: item.id, participantUid: uid, quantity });
+        await setDoc(ref, { itemId: item.id, participantUid: uid, quantity: capped });
       }
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : "Could not update claim.");
@@ -245,7 +247,13 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
 
   async function confirmClaim() {
     if (!selectedItem) return;
-    await setMyClaim(selectedItem, claimQty);
+    // Re-validate against live claims at confirm time (guards race conditions).
+    const othersTotal = claims
+      .filter((c) => c.itemId === selectedItem.id && c.participantUid !== uid)
+      .reduce((sum, c) => sum + c.quantity, 0);
+    const maxAllowed = Math.max(0, selectedItem.originalQuantity - othersTotal);
+    const safeQty = Math.min(claimQty, maxAllowed);
+    await setMyClaim(selectedItem, safeQty);
     setSelectedItem(null);
   }
 
@@ -933,7 +941,7 @@ function ReviewSheet({
             <div className="ml-9 space-y-1">
               {b.items.map((li) => (
                 <div key={li.name} className="flex justify-between text-sm">
-                  <span style={{ color: C.onSurfaceVariant }}>{li.name} ×{trim(li.quantity)}</span>
+                  <span style={{ color: C.onSurfaceVariant }}><ItemLabel quantity={li.quantity} originalQuantity={li.originalQuantity} name={li.name} /></span>
                   <span style={{ color: C.onSurface }}>{formatMoney(li.price, currency)}</span>
                 </div>
               ))}
@@ -1051,4 +1059,36 @@ function round(n: number): number {
 
 function trim(n: number): string {
   return n === Math.round(n) ? String(Math.round(n)) : n.toFixed(2);
+}
+
+// Renders "item name", "2× item name", or "<b>2 shares</b> of item name"
+function ItemLabel({ quantity, originalQuantity, name }: { quantity: number; originalQuantity: number; name: string }) {
+  if (Math.abs(quantity - Math.round(quantity)) < 0.001) {
+    const n = Math.round(quantity);
+    return <>{n === 1 ? name : <><strong>{n}×</strong> {name}</>}</>;
+  }
+  const ratio = quantity / originalQuantity;
+  for (let d = 2; d <= 24; d++) {
+    const n = Math.round(ratio * d);
+    if (n > 0 && Math.abs(n / d - ratio) < 0.01) {
+      return <><strong>{n} share{n === 1 ? "" : "s"}</strong> of {name}</>;
+    }
+  }
+  return <>{trim(quantity)}× {name}</>;
+}
+
+// Keep the string version for any non-JSX callers
+function formatItemLabel(quantity: number, originalQuantity: number, name: string): string {
+  if (Math.abs(quantity - Math.round(quantity)) < 0.001) {
+    const n = Math.round(quantity);
+    return n === 1 ? name : `${n}× ${name}`;
+  }
+  const ratio = quantity / originalQuantity;
+  for (let d = 2; d <= 24; d++) {
+    const n = Math.round(ratio * d);
+    if (n > 0 && Math.abs(n / d - ratio) < 0.01) {
+      return `${n} share${n === 1 ? "" : "s"} of ${name}`;
+    }
+  }
+  return `${trim(quantity)}× ${name}`;
 }
