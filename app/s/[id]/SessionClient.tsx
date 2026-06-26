@@ -71,6 +71,10 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
   const [claimQty, setClaimQty] = useState(0);
   const [maxClaimQty, setMaxClaimQty] = useState(0); // snapshotted at sheet open — never drifts
   const [reviewOpen, setReviewOpen] = useState(false);
+  // Custom split mode
+  type ClaimMode = "mine" | "custom";
+  const [claimMode, setClaimMode] = useState<ClaimMode>("mine");
+  const [customShares, setCustomShares] = useState<Record<string, number>>({});
 
   // ── Firebase listeners ──────────────────────────────────────────────────
   useEffect(() => {
@@ -148,10 +152,23 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
   );
   const myBreakdown = breakdowns.find((b) => b.uid === uid);
   const assignedItemCount = useMemo(
-    () => session?.items.filter((item) => claims.some((c) => c.itemId === item.id && c.quantity > 0)).length ?? 0,
+    () => session?.items.filter((item) => remainingQuantity(item, claims) < 0.001).length ?? 0,
     [session, claims]
   );
   const totalItems = session?.items.length ?? 0;
+
+  // Items sorted: unassigned & partial first, fully-claimed last.
+  const sortedItems = useMemo(
+    () =>
+      [...(session?.items ?? [])].sort((a, b) => {
+        const aFull = remainingQuantity(a, claims) < 0.001;
+        const bFull = remainingQuantity(b, claims) < 0.001;
+        if (aFull !== bFull) return aFull ? 1 : -1;
+        return 0;
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [session?.items, claims]
+  );
 
   // Full bill total with all charges (mirrors iOS SplitCalculator.billTotal).
   const fullBillTotal = useMemo(() => (session ? billTotal(session) : 0), [session]);
@@ -208,14 +225,50 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
     const mine = quantityForParticipant(item.id, uid ?? "", claims);
     const remaining = remainingQuantity(item, claims);
     setClaimQty(mine);
-    // Snapshot the max once: my current claim + unclaimed by others. Fixed for the sheet lifetime.
     setMaxClaimQty(mine + remaining);
+    setClaimMode("mine");
+    // Initialise custom shares from existing claims for this item.
+    // Each claimer starts with shares proportional to their claimed quantity (rounded to int, min 1).
+    const existingClaims = claims.filter((c) => c.itemId === item.id && c.quantity > 0);
+    if (existingClaims.length > 0) {
+      const initialShares: Record<string, number> = {};
+      for (const c of existingClaims) {
+        initialShares[c.participantUid] = Math.max(1, Math.round(c.quantity));
+      }
+      setCustomShares(initialShares);
+    } else {
+      // Default: current user gets 1 share
+      setCustomShares(uid ? { [uid]: 1 } : {});
+    }
     setSelectedItem(item);
   }
 
   async function confirmClaim() {
     if (!selectedItem) return;
     await setMyClaim(selectedItem, claimQty);
+    setSelectedItem(null);
+  }
+
+  async function confirmCustomSplit() {
+    if (!selectedItem || !session) return;
+    const totalShares = Object.values(customShares).reduce((s, v) => s + v, 0);
+    if (totalShares <= 0) return;
+    const db = getDb();
+    try {
+      await Promise.all(
+        participants.map((p) => {
+          const shares = customShares[p.uid] ?? 0;
+          const qty = (shares / totalShares) * selectedItem.originalQuantity;
+          const ref = doc(db, "sessions", sessionId, "claims", `${p.uid}_${selectedItem.id}`);
+          if (qty < 0.0001) {
+            return deleteDoc(ref).catch(() => {/* already deleted */});
+          }
+          return setDoc(ref, { itemId: selectedItem.id, participantUid: p.uid, quantity: qty });
+        })
+      );
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Could not save split.");
+    }
     setSelectedItem(null);
   }
 
@@ -450,12 +503,11 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
         </div>
 
         <div className="space-y-3">
-          {session.items.map((item) => {
+          {sortedItems.map((item) => {
             const mine = quantityForParticipant(item.id, uid ?? "", claims);
             const remaining = remainingQuantity(item, claims);
             const fullyAssigned = remaining < 0.001;
             const claimers = claims.filter((c) => c.itemId === item.id && c.quantity > 0);
-            const iHaveClaim = mine > 0;
 
             return (
               <div
@@ -465,7 +517,7 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
                   backgroundColor: "#fff",
                   border: fullyAssigned
                     ? `2px solid ${C.secondaryFixedDim}`
-                    : `2px dashed ${C.outlineVariant}`,
+                    : `2px dashed ${C.error}`,
                   boxShadow: "0 2px 15px rgba(22,52,44,0.04)",
                 }}
                 onClick={() => openItemSheet(item)}
@@ -506,51 +558,6 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
                         </span>
                       );
                     })}
-                  </div>
-                )}
-
-                {/* Quick actions */}
-                {!readOnly && (
-                  <div className="flex items-center justify-between mt-4">
-                    <div className="flex gap-1">
-                      {claimers.map((c) => {
-                        const p = participants.find((x) => x.uid === c.participantUid);
-                        return (
-                          <div
-                            key={c.id}
-                            className="w-2.5 h-2.5 rounded-full"
-                            style={{ backgroundColor: p?.colorHex ?? "#ddd" }}
-                          />
-                        );
-                      })}
-                      {remaining > 0.001 && Array.from({ length: Math.min(Math.round(remaining), 5) }).map((_, i) => (
-                        <div key={i} className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: C.outlineVariant }} />
-                      ))}
-                    </div>
-                    {!iHaveClaim && remaining > 0.001 && (
-                      <button
-                        className="text-xs font-bold rounded-full px-4 py-1.5 border transition-colors"
-                        style={{ color: C.primary, borderColor: C.primary }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setMyClaim(item, 1);
-                        }}
-                      >
-                        Add myself
-                      </button>
-                    )}
-                    {iHaveClaim && (
-                      <button
-                        className="text-xs font-bold rounded-full px-4 py-1.5 transition-colors"
-                        style={{ color: C.onSecondaryContainer, backgroundColor: C.secondaryContainer }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          openItemSheet(item);
-                        }}
-                      >
-                        Edit ({trim(mine)})
-                      </button>
-                    )}
                   </div>
                 )}
               </div>
@@ -633,7 +640,8 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
       {selectedItem && (
         <BottomSheet onClose={() => setSelectedItem(null)}>
           <div>
-            <div className="flex justify-between items-start mb-6">
+            {/* Item header */}
+            <div className="flex justify-between items-start mb-5">
               <div>
                 <h3 className="text-xl font-bold" style={{ color: C.primary }}>{selectedItem.name}</h3>
                 <p className="text-sm mt-0.5" style={{ color: C.onSurfaceVariant }}>
@@ -643,34 +651,123 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
               </div>
             </div>
 
-            {/* Qty stepper */}
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-sm font-semibold" style={{ color: C.onSurfaceVariant }}>Your quantity</span>
-              <ClaimStepper
-                value={claimQty}
-                max={maxClaimQty}
-                onChange={setClaimQty}
-              />
+            {/* Mode picker */}
+            <div
+              className="flex rounded-xl p-1 mb-5"
+              style={{ backgroundColor: C.surfaceContainerHigh }}
+            >
+              {(["mine", "custom"] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setClaimMode(m)}
+                  className="flex-1 py-2 rounded-lg text-sm font-semibold transition-all"
+                  style={{
+                    backgroundColor: claimMode === m ? "#fff" : "transparent",
+                    color: claimMode === m ? C.primary : C.onSurfaceVariant,
+                    boxShadow: claimMode === m ? "0 1px 4px rgba(22,52,44,0.12)" : "none",
+                  }}
+                >
+                  {m === "mine" ? "My share" : "Custom split"}
+                </button>
+              ))}
             </div>
 
-            {/* Claim remaining shortcut */}
-            {claimQty < maxClaimQty && (
-              <button
-                onClick={() => setClaimQty(maxClaimQty)}
-                className="w-full text-sm font-semibold py-2 mb-4 rounded-xl transition-colors"
-                style={{ color: C.secondary, backgroundColor: `${C.secondaryContainer}60` }}
-              >
-                Claim all remaining ({trim(maxClaimQty - claimQty)})
-              </button>
-            )}
+            {claimMode === "mine" ? (
+              <>
+                {/* Qty stepper */}
+                <div className="flex items-center justify-between mb-4">
+                  <span className="text-sm font-semibold" style={{ color: C.onSurfaceVariant }}>Your quantity</span>
+                  <ClaimStepper value={claimQty} max={maxClaimQty} onChange={setClaimQty} />
+                </div>
+                {claimQty < maxClaimQty && (
+                  <button
+                    onClick={() => setClaimQty(maxClaimQty)}
+                    className="w-full text-sm font-semibold py-2 mb-4 rounded-xl transition-colors"
+                    style={{ color: C.secondary, backgroundColor: `${C.secondaryContainer}60` }}
+                  >
+                    Claim all remaining ({trim(maxClaimQty - claimQty)})
+                  </button>
+                )}
+                <button
+                  onClick={confirmClaim}
+                  className="w-full h-12 rounded-full font-bold text-white transition-all active:scale-95"
+                  style={{ backgroundColor: C.primary }}
+                >
+                  Confirm
+                </button>
+              </>
+            ) : (
+              <>
+                {/* Custom split — shares per participant */}
+                <div className="space-y-3 mb-4">
+                  {participants.map((p) => {
+                    const shares = customShares[p.uid] ?? 0;
+                    const totalShares = Object.values(customShares).reduce((s, v) => s + v, 0);
+                    const price =
+                      totalShares > 0
+                        ? (shares / totalShares) * selectedItem.totalPrice
+                        : 0;
+                    const isMe = p.uid === uid;
+                    return (
+                      <div
+                        key={p.uid}
+                        className="flex items-center justify-between rounded-xl px-3 py-2.5"
+                        style={{
+                          backgroundColor: isMe ? `${C.primaryContainer}22` : C.surfaceContainerLow,
+                          border: isMe ? `1.5px solid ${C.primaryContainer}` : "none",
+                        }}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Avatar name={p.displayName} color={p.colorHex} size={32} />
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold truncate" style={{ color: C.onSurface }}>
+                              {isMe ? "You" : p.displayName}
+                            </p>
+                            {shares > 0 && (
+                              <p className="text-xs" style={{ color: C.onSurfaceVariant }}>
+                                {formatMoney(price, session.currency)}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                        <ShareStepper
+                          value={shares}
+                          onChange={(v) =>
+                            setCustomShares((prev) => ({ ...prev, [p.uid]: v }))
+                          }
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
 
-            <button
-              onClick={confirmClaim}
-              className="w-full h-12 rounded-full font-bold text-white transition-all active:scale-95"
-              style={{ backgroundColor: C.primary }}
-            >
-              Confirm
-            </button>
+                {/* Coverage summary */}
+                {(() => {
+                  const totalShares = Object.values(customShares).reduce((s, v) => s + v, 0);
+                  const coveredCount = Object.values(customShares).filter((v) => v > 0).length;
+                  return totalShares > 0 ? (
+                    <p className="text-xs text-center mb-3" style={{ color: C.onSurfaceVariant }}>
+                      Split among {coveredCount} {coveredCount === 1 ? "person" : "people"}
+                      {" · "}total {formatMoney(selectedItem.totalPrice, session.currency)}
+                    </p>
+                  ) : null;
+                })()}
+
+                <button
+                  onClick={confirmCustomSplit}
+                  disabled={Object.values(customShares).reduce((s, v) => s + v, 0) <= 0}
+                  className="w-full h-12 rounded-full font-bold text-white transition-all active:scale-95"
+                  style={{
+                    backgroundColor:
+                      Object.values(customShares).reduce((s, v) => s + v, 0) > 0
+                        ? C.primary
+                        : C.outlineVariant,
+                  }}
+                >
+                  Confirm Split
+                </button>
+              </>
+            )}
           </div>
         </BottomSheet>
       )}
@@ -741,6 +838,38 @@ function ClaimStepper({
         disabled={value >= max - 0.001}
         className="px-4 py-2 text-lg font-bold transition-colors"
         style={{ color: value >= max - 0.001 ? C.outlineVariant : C.primary }}
+      >
+        +
+      </button>
+    </div>
+  );
+}
+
+// Integer share stepper for custom split (no upper bound)
+function ShareStepper({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  return (
+    <div
+      className="flex items-center rounded-xl overflow-hidden flex-shrink-0"
+      style={{ border: `1.5px solid ${C.outlineVariant}` }}
+    >
+      <button
+        onClick={() => onChange(Math.max(0, value - 1))}
+        disabled={value <= 0}
+        className="px-3 py-1.5 text-lg font-bold transition-colors"
+        style={{ color: value <= 0 ? C.outlineVariant : C.primary }}
+      >
+        −
+      </button>
+      <span
+        className="px-3 min-w-[2rem] text-center font-semibold text-sm"
+        style={{ color: C.onSurface }}
+      >
+        {value}
+      </span>
+      <button
+        onClick={() => onChange(value + 1)}
+        className="px-3 py-1.5 text-lg font-bold transition-colors"
+        style={{ color: C.primary }}
       >
         +
       </button>
