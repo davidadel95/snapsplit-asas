@@ -15,6 +15,18 @@ import {
   isFirebaseConfigured,
 } from "@/lib/firebase";
 import {
+  logDeepLinkOpened,
+  logSessionLoaded,
+  logSessionNotFound,
+  logSessionError,
+  logSessionJoined,
+  logItemAssignmentOpened,
+  logItemAssigned,
+  logItemClaimCleared,
+  logReviewBillOpened,
+  logAppStoreTapped,
+} from "@/lib/analytics";
+import {
   computeBreakdowns,
   billTotal,
   colorForIndex,
@@ -76,8 +88,17 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
   const [claimMode, setClaimMode] = useState<ClaimMode>("mine");
   const [customShares, setCustomShares] = useState<Record<string, number>>({});
 
+  // Track when the page mounted so we can measure load time.
+  const loadStartRef = useRef<number>(Date.now());
+  // Ensure deep-link-opened is logged exactly once per mount.
+  const deepLinkLoggedRef = useRef(false);
+
   // ── Firebase listeners ──────────────────────────────────────────────────
   useEffect(() => {
+    if (!deepLinkLoggedRef.current) {
+      deepLinkLoggedRef.current = true;
+      logDeepLinkOpened(sessionId);
+    }
     if (!isFirebaseConfigured()) { setPhase("needsConfig"); return; }
 
     let unsubSession = () => {};
@@ -93,35 +114,53 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
 
         const db = getDb();
 
+        // Track whether we've already logged a successful load (first snapshot only).
+        let sessionLoadLogged = false;
+
         unsubSession = onSnapshot(doc(db, "sessions", sessionId), (snap) => {
-          if (!snap.exists()) { setSession(null); setPhase("notFound"); return; }
+          if (!snap.exists()) {
+            logSessionNotFound(sessionId);
+            setSession(null); setPhase("notFound"); return;
+          }
           const d = snap.data();
+          const items = (d.items ?? []) as SessionItem[];
+          if (!sessionLoadLogged) {
+            sessionLoadLogged = true;
+            logSessionLoaded(
+              sessionId,
+              items.length,
+              d.currency ?? "EGP",
+              Date.now() - loadStartRef.current
+            );
+          }
           setSession({
             id: snap.id,
             hostUserId: d.hostUserId,
             status: d.status,
             currency: d.currency ?? "EGP",
-            items: (d.items ?? []) as SessionItem[],
+            items,
             additionalCharges: d.additionalCharges ?? [],
             fixedCharges: d.fixedCharges ?? [],
             createdAt: d.createdAt ?? null,
             expiresAt: d.expiresAt,
           });
-        }, (err) => { setErrorMessage(err.message); setPhase("error"); });
+        }, (err) => { logSessionError(sessionId, err.message); setErrorMessage(err.message); setPhase("error"); });
 
         unsubParticipants = onSnapshot(
           collection(db, "sessions", sessionId, "participants"),
           (snap) => setParticipants(snap.docs.map((d) => d.data() as SessionParticipant)),
-          (err) => { setErrorMessage(err.message); setPhase("error"); }
+          (err) => { logSessionError(sessionId, err.message); setErrorMessage(err.message); setPhase("error"); }
         );
 
         unsubClaims = onSnapshot(
           collection(db, "sessions", sessionId, "claims"),
           (snap) => setClaims(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<SessionClaim, "id">) }))),
-          (err) => { setErrorMessage(err.message); setPhase("error"); }
+          (err) => { logSessionError(sessionId, err.message); setErrorMessage(err.message); setPhase("error"); }
         );
       } catch (err) {
-        setErrorMessage(err instanceof Error ? err.message : "Something went wrong.");
+        const msg = err instanceof Error ? err.message : "Something went wrong.";
+        logSessionError(sessionId, msg);
+        setErrorMessage(msg);
         setPhase("error");
       }
     })();
@@ -197,6 +236,7 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
         joinedAt: serverTimestamp(),
         lastSeenAt: serverTimestamp(),
       });
+      logSessionJoined(sessionId, participants.length + 1);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : "Could not join.");
       setPhase("error");
@@ -242,6 +282,7 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
       // Default: current user gets 1 share
       setCustomShares(uid ? { [uid]: 1 } : {});
     }
+    logItemAssignmentOpened(item.name);
     setSelectedItem(item);
   }
 
@@ -254,6 +295,11 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
     const maxAllowed = Math.max(0, selectedItem.originalQuantity - othersTotal);
     const safeQty = Math.min(claimQty, maxAllowed);
     await setMyClaim(selectedItem, safeQty);
+    if (safeQty <= 0) {
+      logItemClaimCleared(selectedItem.name, sessionId);
+    } else {
+      logItemAssigned(selectedItem.name, "mine", safeQty, sessionId);
+    }
     setSelectedItem(null);
   }
 
@@ -274,6 +320,7 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
           return setDoc(ref, { itemId: selectedItem.id, participantUid: p.uid, quantity: qty });
         })
       );
+      logItemAssigned(selectedItem.name, "custom", selectedItem.originalQuantity, sessionId);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : "Could not save split.");
     }
@@ -304,7 +351,7 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
         <StatusCard
           title="Bill not found"
           message="This link may have expired or already been settled. Ask the host for a new one."
-          cta={{ label: "Get the App", href: APP_STORE_URL }}
+          cta={{ label: "Get the App", href: APP_STORE_URL, onClick: () => logAppStoreTapped("not_found") }}
         />
       </FullPage>
     );
@@ -334,6 +381,7 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
             href={APP_STORE_URL}
             target="_blank"
             rel="noopener noreferrer"
+            onClick={() => logAppStoreTapped("join_screen")}
             className="text-xs font-semibold rounded-full px-3 py-1.5 transition-colors"
             style={{ color: C.primary, backgroundColor: C.surfaceContainerHigh }}
           >
@@ -442,14 +490,13 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
           href={APP_STORE_URL}
           target="_blank"
           rel="noopener noreferrer"
+          onClick={() => logAppStoreTapped("header")}
           className="text-xs font-semibold rounded-full px-3 py-1.5 transition-colors"
           style={{ color: C.primary, backgroundColor: C.surfaceContainerHigh }}
         >
           Open App
         </a>
       </header>
-
-      {/* Scrollable content */}
       <main className="flex-1 px-4 pb-40 max-w-2xl mx-auto w-full">
         {/* ── Progress card ── */}
         <section
@@ -633,7 +680,10 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
                 </div>
               </div>
               <button
-                onClick={() => setReviewOpen(true)}
+                onClick={() => {
+                  logReviewBillOpened(sessionId, assignedItemCount, totalItems);
+                  setReviewOpen(true);
+                }}
                 className="font-bold text-sm rounded-xl px-5 py-2.5 active:scale-95 transition-all"
                 style={{ backgroundColor: C.secondaryContainer, color: C.onSecondaryContainer }}
               >
@@ -996,7 +1046,7 @@ function StatusCard({
 }: {
   title: string;
   message: string;
-  cta?: { label: string; href: string };
+  cta?: { label: string; href: string; onClick?: () => void };
 }) {
   return (
     <div
@@ -1016,6 +1066,7 @@ function StatusCard({
           href={cta.href}
           target="_blank"
           rel="noopener noreferrer"
+          onClick={cta.onClick}
           className="inline-block font-bold text-sm rounded-full px-6 py-3 text-white transition-colors"
           style={{ backgroundColor: C.primary }}
         >
