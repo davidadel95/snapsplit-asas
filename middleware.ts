@@ -9,6 +9,14 @@ export function middleware(request: NextRequest) {
     return NextResponse.redirect('https://www.google.com');
   }
 
+  // Protect the admin feedback dashboard
+  if (request.nextUrl.pathname.startsWith('/admin')) {
+    const sessionCookie = request.cookies.get('gallery_session');
+    if (sessionCookie?.value !== 'authenticated_user_token') {
+      return NextResponse.redirect(new URL('/', request.url));
+    }
+  }
+
   return NextResponse.next();
 }
 
