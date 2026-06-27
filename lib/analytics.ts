@@ -1,12 +1,11 @@
 // Analytics helper for SnapSplit web.
 //
-// Wraps Firebase Analytics (GA4) with typed, domain-specific event functions
-// that mirror the iOS AnalyticsManager so both platforms report consistent
-// event names and parameters to the same Firebase project.
+// Dual-logs every event to:
+//   • Firebase Analytics (GA4) — same project as the iOS app
+//   • Amplitude           — same API key as the iOS app (NEXT_PUBLIC_AMPLITUDE_API_KEY)
 //
-// All functions are no-ops when Firebase is not configured (e.g. local dev
-// without the NEXT_PUBLIC_FIREBASE_* env vars set), so callers never need
-// to guard against missing config.
+// All functions are no-ops when the respective SDK is not configured, so
+// callers never need to guard against missing config.
 
 import {
   getAnalytics,
@@ -15,13 +14,16 @@ import {
 } from "firebase/analytics";
 import { isFirebaseConfigured } from "./firebase";
 import { initializeApp, getApps, getApp } from "firebase/app";
+import * as amplitude from "@amplitude/analytics-browser";
 
-let analyticsInstance: Analytics | null = null;
+// ─── Firebase ────────────────────────────────────────────────────────────────
 
-function getAnalyticsInstance(): Analytics | null {
+let firebaseAnalytics: Analytics | null = null;
+
+function getFirebaseAnalytics(): Analytics | null {
   if (typeof window === "undefined") return null; // SSR guard
   if (!isFirebaseConfigured()) return null;
-  if (analyticsInstance) return analyticsInstance;
+  if (firebaseAnalytics) return firebaseAnalytics;
   try {
     const firebaseConfig = {
       apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -33,18 +35,45 @@ function getAnalyticsInstance(): Analytics | null {
       measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
     };
     const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
-    analyticsInstance = getAnalytics(app);
-    return analyticsInstance;
+    firebaseAnalytics = getAnalytics(app);
+    return firebaseAnalytics;
   } catch {
     return null;
   }
 }
 
+// ─── Amplitude ───────────────────────────────────────────────────────────────
+
+let amplitudeInitialised = false;
+
+function getAmplitude(): typeof amplitude | null {
+  if (typeof window === "undefined") return null; // SSR guard
+  const key = process.env.NEXT_PUBLIC_AMPLITUDE_API_KEY;
+  if (!key) return null;
+  if (!amplitudeInitialised) {
+    amplitude.init(key, {
+      defaultTracking: false, // we log explicit events only, matching iOS behaviour
+    });
+    amplitudeInitialised = true;
+  }
+  return amplitude;
+}
+
+// ─── Unified log ─────────────────────────────────────────────────────────────
+
 function log(eventName: string, params?: Record<string, unknown>) {
-  const analytics = getAnalyticsInstance();
-  if (!analytics) return;
+  // Firebase
   try {
-    firebaseLogEvent(analytics, eventName, params);
+    const fb = getFirebaseAnalytics();
+    if (fb) firebaseLogEvent(fb, eventName, params);
+  } catch {
+    // never throw from analytics
+  }
+
+  // Amplitude
+  try {
+    const amp = getAmplitude();
+    if (amp) amp.track(eventName, params);
   } catch {
     // never throw from analytics
   }
