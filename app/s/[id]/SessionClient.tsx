@@ -936,9 +936,6 @@ function ShareStepper({ value, onChange }: { value: number; onChange: (v: number
 }
 
 function BottomSheet({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
-  const sheetRef = useRef<HTMLDivElement>(null);
-
-  // Close on backdrop click
   const handleBackdrop = useCallback(
     (e: React.MouseEvent) => { if (e.target === e.currentTarget) onClose(); },
     [onClose]
@@ -951,17 +948,31 @@ function BottomSheet({ children, onClose }: { children: React.ReactNode; onClose
       onClick={handleBackdrop}
     >
       <div
-        ref={sheetRef}
-        className="w-full max-w-2xl rounded-t-[32px] px-6 pt-4 pb-8"
-        style={{ backgroundColor: C.surface }}
+        className="w-full max-w-2xl rounded-t-[32px] flex flex-col"
+        style={{ backgroundColor: C.surface, maxHeight: "85dvh" }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Handle */}
-        <div
-          className="w-12 h-1.5 rounded-full mx-auto mb-6"
-          style={{ backgroundColor: C.outlineVariant }}
-        />
-        {children}
+        {/* Handle row with close button */}
+        <div className="flex-shrink-0 relative px-6 pt-4 pb-2">
+          <div
+            className="w-12 h-1.5 rounded-full mx-auto"
+            style={{ backgroundColor: C.outlineVariant }}
+          />
+          <button
+            onClick={onClose}
+            className="absolute top-3 right-4 p-1.5 rounded-full"
+            style={{ color: C.onSurfaceVariant }}
+            aria-label="Close"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+        {/* Scrollable content */}
+        <div className="overflow-y-auto px-6 pb-8">
+          {children}
+        </div>
       </div>
     </div>
   );
